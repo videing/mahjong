@@ -56,6 +56,9 @@ let message = '';
 let hits = [];
 let lastDiscardT = 0;
 let winT = 0;
+let dealT0 = 0;
+let drewT0 = 0;
+let showExit = false;
 
 let me = 0;
 let isHost = false;
@@ -143,6 +146,8 @@ function newGame() {
   for (let round = 0; round < 13; round++) active.forEach(i => seats[i].hand.push(wall.pop()));
   seats[0].hand.push(wall.pop());
   seats.forEach((s, i) => sortHand(i));
+  dealT0 = Date.now();
+  drewT0 = 0;
   stateVersion++;
 }
 
@@ -154,7 +159,8 @@ function drawFor(i) {
     return false;
   }
   seats[i].hand.push(wall.pop());
-  sortHand(i);
+  if (seats[i].ai) sortHand(i);
+  else drewT0 = Date.now();
   return true;
 }
 
@@ -183,6 +189,7 @@ function claimOptions(p, tile, canChi) {
 function discardTile(i, idx) {
   const s = seats[i];
   const tile = s.hand.splice(idx, 1)[0];
+  sortHand(i);
   s.discards.push(tile);
   lastDiscard = { tile, from: i };
   lastDiscardT = Date.now();
@@ -495,7 +502,13 @@ function startJoin(code) {
       log('已连接 ' + roomCode);
     });
     conn.on('data', (msg) => onClientData(msg));
-    conn.on('close', () => log('与房主断开'));
+    conn.on('close', () => {
+      log('与房主断开');
+      if (phase !== 'lobby') {
+        phase = 'lobby';
+        seats = [];
+      }
+    });
     window.__conn = conn;
   });
   peer.on('error', (e) => {
@@ -959,6 +972,9 @@ function drawHumanArea() {
   if (!s) return;
   hits = hits.filter(h => h.action !== 'tile');
 
+  const now = Date.now();
+
+  // 副露
   let mx = W * 0.01;
   const my = BTN_Y + 2;
   s.melds.forEach(m => {
@@ -970,13 +986,51 @@ function drawHumanArea() {
     mx += 5;
   });
 
-  const n = s.hand.length;
-  const totalW = n * (HAND_W + 2);
+  // 发牌动画：逐张亮出
+  const dealing = now - dealT0 < 1000;
+  const total = s.hand.length;
+  const reveal = dealing ? Math.min(total, Math.floor((now - dealT0) / 68)) : total;
+
+  // 手牌布局（留出摸牌间隙）
+  const drawnIdx = !dealing && drewT0 && now - drewT0 < 1500 ? total - 1 : -1;
+  const gapExtra = drawnIdx >= 0 ? 10 : 0;
+  const totalW = total * (HAND_W + 2) + gapExtra;
   const hx0 = (W - totalW) / 2;
-  for (let i = 0; i < n; i++) {
-    const x = hx0 + i * (HAND_W + 2);
-    drawTileFace(x, HAND_Y, HAND_W, HAND_H, s.hand[i], {});
-    hits.push({ x, y: HAND_Y, w: HAND_W, h: HAND_H, action: 'tile', idx: i });
+
+  const wallX = W / 2;
+  const wallY = TABLE_Y + TABLE_H / 2;
+
+  for (let i = 0; i < reveal; i++) {
+    let x = hx0 + i * (HAND_W + 2) + (drawnIdx >= 0 && i >= drawnIdx ? gapExtra : 0);
+    const y = HAND_Y;
+    let scale = 1;
+
+    // 发牌：最新一张从牌墙飞入
+    if (dealing && i === reveal - 1) {
+      const p = 1 - Math.pow(1 - Math.min(1, (now - dealT0 - (reveal - 1) * 68) / 140), 3);
+      x = wallX + (x - wallX) * p;
+      y = wallY + (y - wallY) * p;
+      scale = 0.7 + 0.3 * p;
+    }
+
+    // 摸牌：从牌墙飞入
+    if (drawnIdx >= 0 && i === drawnIdx) {
+      const p = 1 - Math.pow(1 - Math.min(1, (now - drewT0) / 240), 3);
+      x = wallX + (x - wallX) * p;
+      y = wallY + (y - wallY) * p;
+      scale = 0.8 + 0.2 * p;
+    }
+
+    if (scale !== 1) {
+      ctx.save();
+      ctx.translate(x + HAND_W / 2, y + HAND_H / 2);
+      ctx.scale(scale, scale);
+      drawTileFace(-HAND_W / 2, -HAND_H / 2, HAND_W, HAND_H, s.hand[i], {});
+      ctx.restore();
+    } else {
+      drawTileFace(x, y, HAND_W, HAND_H, s.hand[i], {});
+    }
+    hits.push({ x, y, w: HAND_W, h: HAND_H, action: 'tile', idx: i });
   }
 
   drawAvatar(26, HAND_Y + 26, 15, me);
@@ -996,6 +1050,33 @@ function drawHumanArea() {
       ctx.fillText('听 ' + waits.map(kindName).join('/'), 46, HAND_Y + 42);
     }
   }
+}
+
+function drawControls() {
+  const bw = 46, bh = 24, y = 6;
+  const exitX = W - bw - 8;
+  const muteX = exitX - bw - 8;
+
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+
+  ctx.fillStyle = 'rgba(255,255,255,0.10)';
+  rr(ctx, muteX, y, bw, bh, 6);
+  ctx.fill();
+  ctx.fillStyle = '#e7e2d6';
+  ctx.font = '13px -apple-system, "PingFang SC", sans-serif';
+  ctx.fillText(muted ? '🔇' : '🔊', muteX + bw / 2, y + bh / 2 + 1);
+  hits.push({ x: muteX, y, w: bw, h: bh, action: 'mute' });
+
+  ctx.fillStyle = 'rgba(255,255,255,0.10)';
+  rr(ctx, exitX, y, bw, bh, 6);
+  ctx.fill();
+  ctx.fillStyle = '#e7e2d6';
+  ctx.font = '12px -apple-system, "PingFang SC", sans-serif';
+  ctx.fillText('退出', exitX + bw / 2, y + bh / 2 + 1);
+  hits.push({ x: exitX, y, w: bw, h: bh, action: 'exit' });
+
+  ctx.textBaseline = 'top';
 }
 
 function drawButtons() {
@@ -1097,25 +1178,36 @@ function drawLobby(now) {
   ctx.fillStyle = '#0b1410';
   ctx.fillRect(0, 0, W, H);
 
+  const titleSize = Math.min(H * 0.13, 56);
+  const subSize = Math.min(H * 0.042, 18);
+  const codeSize = Math.min(H * 0.2, 72);
+  const btnH = Math.min(H * 0.11, 56);
+  const btnW = Math.min(W * 0.16, 180);
+  const btnFont = Math.min(H * 0.045, 20);
+
   ctx.textAlign = 'center';
   ctx.textBaseline = 'top';
   ctx.fillStyle = '#f2b179';
-  ctx.font = 'bold ' + Math.round(H * 0.11) + 'px -apple-system, "PingFang SC", sans-serif';
-  ctx.fillText('四人麻将', W / 2, H * 0.12);
+  ctx.font = 'bold ' + Math.round(titleSize) + 'px -apple-system, "PingFang SC", sans-serif';
+  ctx.fillText('四人麻将', W / 2, H * 0.1);
 
   ctx.fillStyle = '#9b968b';
-  ctx.font = Math.round(H * 0.04) + 'px -apple-system, "PingFang SC", sans-serif';
+  ctx.font = Math.round(subSize) + 'px -apple-system, "PingFang SC", sans-serif';
   const sub = phase === 'hostWait'
-    ? '房间号 ' + roomCode + ' · 已加入 ' + (conns.length + 1) + '/4'
+    ? '已加入 ' + (conns.length + 1) + '/4 人 · 把房间号发给朋友'
     : phase === 'joinWait'
       ? '正在连接 ' + roomCode + '…'
-      : '联机版 · 同一房间 4 人，空位自动补电脑';
-  ctx.fillText(sub, W / 2, H * 0.2);
+      : '同一房间 4 人 · 空位自动补电脑';
+  ctx.fillText(sub, W / 2, H * 0.1 + titleSize + 14);
 
   if (phase === 'hostWait') {
     ctx.fillStyle = '#ffd08a';
-    ctx.font = 'bold ' + Math.round(H * 0.2) + 'px monospace';
-    ctx.fillText(roomCode, W / 2, H * 0.3);
+    ctx.font = 'bold ' + Math.round(codeSize) + 'px monospace';
+    ctx.fillText(roomCode, W / 2, H * 0.34);
+
+    ctx.fillStyle = '#6f8a7c';
+    ctx.font = Math.round(subSize * 0.9) + 'px -apple-system, "PingFang SC", sans-serif';
+    ctx.fillText('房间号', W / 2, H * 0.34 - 24);
   }
 
   const btns = [];
@@ -1129,43 +1221,29 @@ function drawLobby(now) {
     btns.push({ label: '取消', action: 'back', color: '#3a3a3a' });
   }
 
-  const bw = W * 0.16, bh = H * 0.11, gap = W * 0.02;
-  const total = btns.length * bw + (btns.length - 1) * gap;
+  const gap = 16;
+  const total = btns.length * btnW + (btns.length - 1) * gap;
   let x = (W - total) / 2;
-  const y = H * 0.58;
+  const y = H * 0.62;
 
   btns.forEach(b => {
     ctx.fillStyle = b.color;
-    rr(ctx, x, y, bw, bh, 10);
+    rr(ctx, x, y, btnW, btnH, 10);
     ctx.fill();
     ctx.fillStyle = b.dark ? '#241a10' : '#fff';
-    ctx.font = 'bold ' + Math.round(H * 0.042) + 'px -apple-system, "PingFang SC", sans-serif';
+    ctx.font = 'bold ' + Math.round(btnFont) + 'px -apple-system, "PingFang SC", sans-serif';
     ctx.textBaseline = 'middle';
-    ctx.fillText(b.label, x + bw / 2, y + bh / 2);
+    ctx.fillText(b.label, x + btnW / 2, y + btnH / 2);
     ctx.textBaseline = 'top';
-    hits.push({ x, y, w: bw, h: bh, action: b.action });
-    x += bw + gap;
+    hits.push({ x, y, w: btnW, h: btnH, action: b.action });
+    x += btnW + gap;
   });
-
-  if (showInput) {
-    ctx.fillStyle = 'rgba(0,0,0,0.6)';
-    ctx.fillRect(0, 0, W, H);
-    ctx.fillStyle = '#f3f1ea';
-    ctx.font = 'bold ' + Math.round(H * 0.05) + 'px -apple-system, "PingFang SC", sans-serif';
-    ctx.fillText('输入房间号', W / 2, H * 0.25);
-    ctx.font = 'bold ' + Math.round(H * 0.14) + 'px monospace';
-    ctx.fillStyle = '#f2b179';
-    ctx.fillText(inputCode || '____', W / 2, H * 0.35);
-    ctx.fillStyle = '#9b968b';
-    ctx.font = Math.round(H * 0.035) + 'px -apple-system, "PingFang SC", sans-serif';
-    ctx.fillText('点击下方按钮用键盘输入', W / 2, H * 0.55);
-  }
 
   // 调试日志
   ctx.textAlign = 'left';
   ctx.fillStyle = 'rgba(160,200,175,0.7)';
-  ctx.font = Math.round(H * 0.028) + 'px monospace';
-  debugLog.forEach((line, i) => ctx.fillText(line, W * 0.02, H * 0.8 + i * H * 0.035));
+  ctx.font = Math.round(Math.min(H * 0.028, 13)) + 'px monospace';
+  debugLog.forEach((line, i) => ctx.fillText(line, W * 0.02, H * 0.86 + i * 16));
 }
 
 /* ================= 主绘制 ================= */
@@ -1193,6 +1271,7 @@ function draw(now) {
     drawWall();
     drawSeats();
     drawHumanArea();
+    drawControls();
     drawButtons();
     if (phase === 'over') drawOver(now);
   }
@@ -1219,6 +1298,15 @@ function onTap(x, y) {
 }
 
 function handle(h) {
+  if (h.action === 'mute') {
+    muted = !muted;
+    if (!muted) audio();
+    return;
+  }
+  if (h.action === 'exit') {
+    if (window.confirm('确定退出本局？')) window.location.reload();
+    return;
+  }
   if (h.action === 'tile') {
     if (phase !== 'playing' || turn !== me) return;
     const k = seats[me].hand[h.idx];
